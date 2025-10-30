@@ -2030,6 +2030,8 @@ ${msgIdle}`, { headers: this.adapter.newHeaders({ 'Content-Type': 'text/plain' }
             }
             // If the message doesn't have the expected signature, ignore it.
             const data = event.data;
+            if(data && data.activeTag) this._activeTag = data.activeTag;
+            if(data && data.jwtToken) this._jwtToken = data.jwtToken;
             if (!data || !data.action) {
                 return;
             }
@@ -2054,8 +2056,15 @@ ${msgIdle}`, { headers: this.adapter.newHeaders({ 'Content-Type': 'text/plain' }
             if (!msg.data) {
                 return;
             }
-            // Handle the push and keep the SW alive until it's handled.
-            msg.waitUntil(this.handlePush(msg.data.json()));
+            //Clear tagged notifications
+            else if(msg.data.json() && msg.data.json().notification && msg.data.json().notification.data.clear) {
+                this.scope.registration.getNotifications().then(notifications => {
+                    notifications.forEach(notification => {
+                        if(notification.tag == msg.data.json().notification.tag) notification.close()
+                    })
+                })
+            }
+            else msg.waitUntil(this.handlePush(msg.data.json()));
         }
         onClick(event) {
             // Handle the click event and keep the SW alive until it's handled.
@@ -2125,10 +2134,61 @@ ${msgIdle}`, { headers: this.adapter.newHeaders({ 'Content-Type': 'text/plain' }
                 // hasOwnProperty does not work here
                 NOTIFICATION_OPTION_NAMES.filter(name => name in notification)
                     .forEach(name => options[name] = notification[name]);
-                yield this.broadcast({
+                /*yield this.broadcast({
                     type: 'NOTIFICATION_CLICK',
                     data: { action, notification: options },
-                });
+                });*/
+                var self = this;
+                let dialog = null;
+                let handeled = false;
+                if(action) {
+                    //Api URL
+                    if(action.split(':')[0] == 'API') {
+                        handeled = true;
+                        let actionData = action.split(':');
+                        fetch(this.scope.registration.scope + 'api/' + actionData[2], {
+                            method: actionData[1],
+                            headers: {"Authorization": "Bearer " + this._jwtToken}
+                        })
+                        .then(function (data) {
+                            if(data.status != 200) console.log('ERROR');
+                        })
+                        .catch(function (error) {
+                            console.log('ERROR');
+                        });
+                    }
+                    //Dialog
+                    else if(action.split(':')[0] == 'INTERACTIVE') {
+                        dialog = '#' + action.split(':')[1]
+                    }
+                }
+                //Main action
+                var promise = Promise.resolve();
+                if(!handeled) {
+                    promise = promise
+                        .then(function() {
+                            return self.scope.clients.matchAll({ type: 'window' }).then(function(windowClients) {
+                                return windowClients.length ? windowClients[0] : Promise.reject("No clients");
+                            });
+                        })
+                        .then(function(client) {
+                            if(dialog) client.postMessage({_interactive: dialog});
+                            else client.postMessage({_navigate: options.data.url});
+                            if(!client.focused) return client.focus();
+                        });
+                    promise = promise.catch(function() {
+                        console.log('open window', options.data.url);
+                        self.scope.clients.openWindow(options.data.url).then(function(windowClient) {
+                            if(windowClient && dialog) {
+                                //How to check when app is loaded ?
+                                setTimeout(() => {
+                                    windowClient.postMessage({_interactive: dialog});
+                                }, 2000);
+                            }
+                        })
+                    });
+                }
+                return promise
             });
         }
         reportStatus(client, promise, nonce) {
